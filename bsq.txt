@@ -1,0 +1,200 @@
+SELECT  c.id, 'open' AS from_table, c.visp_id, b.pending, c.login, c.name,
+a.ldesc, a.acctype, a.sdesc AS accsdesc, a.flags AS acctype_flags,
+a.currency, a.topup_rate,
+b.payment_type, b.online_time, t.beanrate,
+c.balance, c.flags AS isppw_flags, c.clid, c.beans, b.subsbalance,
+b.ccno, TRIM(UPPER(b.cardtype)) AS cardtype, b.issueno, b.cardnm,
+SUBSTRING(b.expiry, 1, POSITION('-' IN b.expiry)-1) AS expyear,
+SUBSTRING(b.expiry, POSITION('-' IN b.expiry)+1) AS expmon,
+SUBSTRING(b.validfrom, 1, POSITION('-' IN b.validfrom)-1) AS validyear,
+SUBSTRING(b.validfrom, POSITION('-' IN b.validfrom)+1) AS validmonth,
+b.freq,
+a.monthly_charge, a.quarterly_charge, a.annual_charge,
+DAYOFMONTH(b.next) AS nextday, MONTH(b.next) AS nextmonth, YEAR(b.next) AS nextyear,
+DAYOFMONTH(b.next_topup) AS nextday_topup, MONTH(b.next_topup) AS nextmonth_topup, YEAR(b.next_topup) AS nextyear_topup,
+IF(pr.fixed_period IS NOT NULL AND (pr.duration IS NULL OR (b.promo_started IS NOT NULL AND b.promo_started + pr.duration >= CURDATE())), (b.next + INTERVAL pr.fixed_period MONTH), (b.next + INTERVAL b.bill_period MONTH)) AS futurenextbill,
+IF(pr.fixed_period IS NOT NULL AND (pr.duration IS NULL OR (b.promo_started IS NOT NULL AND b.promo_started + pr.duration >= CURDATE())), (b.next + INTERVAL pr.fixed_period MONTH - INTERVAL 1 DAY), (b.next + INTERVAL b.bill_period MONTH - INTERVAL 1 DAY)) AS endbillperiod,
+b.next_topup,
+b.next_topup + INTERVAL (12/a.topup_rate) MONTH AS future_topupdate,
+b.next + INTERVAL (12/a.topup_rate) MONTH AS subs_topupdate,
+TO_DAYS(b.next_topup)-TO_DAYS(NOW()) AS days_to_topup,
+CURDATE() + INTERVAL 1 MONTH AS future_month,
+IF( TO_DAYS(b.next) > TO_DAYS(CURDATE() + INTERVAL 1 MONTH),    DATE_SUB(b.next, INTERVAL 1 MONTH) ,    CURDATE() + INTERVAL 1 YEAR)  AS newstopup_nextbill,
+bg.id AS bgroupid,
+'' AS bgroup_company, '' AS bgtype,
+pc.change_code AS pending_change_code, pc.staff AS pcstaff,
+pc.date AS pc_date, pc.new_acctype AS pc_new_acctype, pc.note AS pc_note, pc.freq AS pc_freq,
+b.processed AS cheque_proc, b.action AS cheque_action,
+DAYOFMONTH(b.action_date) AS actionday, MONTH(b.action_date) AS actionmonth,
+YEAR(b.action_date) AS actionyear,
+FROM_UNIXTIME(c.tim_start)>(CURDATE()-INTERVAL 2 MONTH) AS new_account,
+ce.id AS email_id,
+ROUND((UNIX_TIMESTAMP(CURDATE())-c.tim_closed)/(60*60*24)) AS days_closed,
+TO_DAYS(CURDATE()) - to_days(b.next) as days_overdue,
+b.online_time AS log_update_online_time,
+b.subsbalance AS log_update_subsbalance,
+b.next AS log_update_next,
+b.next_topup AS log_update_next_topup,
+c.beans AS log_update_beans,
+c.balance AS log_update_balance,
+c.flags as log_update_flags,
+IF( email is not null and email <> '',
+        email,
+        CONCAT(mbx.localpart, '@', vdmbx.domain_name)
+) AS email_address,
+b.account_holder AS dd_account_holder,
+b.sort_code AS dd_account_sortcode,
+b.account_no AS dd_account_no,
+b.dd_ref AS dd_ref,
+b.dd_failures AS dd_failures,
+b.indiv_install, b.indiv_recurring, b.promo_id,
+(b.next < date_add(b.promo_started, interval pr.duration month)) AS promo_duration_valid,
+pr.fixed_install AS promo_fixed_install, pr.fixed_recurring AS promo_fixed_recurring,
+pr.fixed_period AS promo_fixed_period, pr.discount_install AS promo_discount_install,
+pr.discount_recurring AS promo_discount_recurring,
+((NOW() < pr.valid_to) AND (NOW() > pr.valid_from)) AS promo_valid,
+ba.amount AS billing_adjustment,
+ba.amount_forced AS billing_adjustment_forced,
+ba.oldest_unpayed < (CURDATE() - INTERVAL 1 MONTH) AS billing_adjustment_due
+
+FROM  billing b INNER JOIN isppw c ON (b.id=c.id)
+INNER JOIN account_types a ON (c.acctype=a.acctype)
+INNER JOIN visp_domains vd ON (c.domain_id = vd.domain_id)
+LEFT OUTER JOIN mailboxes mbx ON (mbx.isppw_id = c.id AND mbx.default_mailbox = 'yes')
+LEFT OUTER JOIN visp_domains vdmbx ON (mbx.domain_id = vdmbx.domain_id)
+LEFT OUTER JOIN tariff t ON (a.acctype = t.acctype AND t.band_id=5)
+LEFT OUTER JOIN pending_changes pc ON (c.id=pc.id)
+LEFT OUTER JOIN billing_groups bg ON (c.bgroup = bg.id)
+LEFT OUTER JOIN contact_email ce ON (c.contact_email_id = ce.id)
+LEFT OUTER JOIN promotions pr ON (b.promo_id = pr.promo_id)
+LEFT OUTER JOIN (
+  SELECT    isppw_id,
+    MIN(date_entered) AS oldest_unpayed,
+    SUM(amount) AS amount,
+    SUM(IF(bill_now = 'yes', amount, 0)) AS amount_forced,
+    SUM(IF(bill_now = 'yes', 1, 0)) AS forced_no
+  FROM
+    billing_adjustment
+  WHERE
+    date_paid IS NULL
+    AND (billing_adjustment_id IS NULL OR billing_adjustment_id <= 1583)
+  GROUP BY
+    isppw_id
+) ba ON ( ba.isppw_id = c.id )
+WHERE  b.pending=0
+AND a.currency='GBP'
+AND a.sdesc <> 'onlpur'
+AND a.flags LIKE '%b%'
+AND LOWER(c.flags) NOT LIKE '%c%'
+AND (
+  ( ba.oldest_unpayed < (CURDATE() - INTERVAL 1 MONTH)
+    OR ba.forced_no > 0
+  )
+  OR (b.next <= CURDATE() AND b.next != '0000-00-00'
+  )
+  OR ( (LOWER(a.flags) LIKE '%f%' OR a.topup_rate <> 0)
+    AND a.topup_rate <> 0
+    AND b.next_topup <= CURDATE()
+    AND b.bill_period IN (12, 3)
+    AND b.next_topup != '0000-00-00'
+  )
+)
+AND b.payment_type IN (2, 1, 4)
+UNION
+
+SELECT  c.id, 'closed' AS from_table, c.visp_id, b.pending, c.login, c.name,
+a.ldesc, a.acctype, a.sdesc AS accsdesc, a.flags AS acctype_flags,
+a.currency, a.topup_rate,
+b.payment_type, b.online_time, t.beanrate,
+c.balance, c.flags AS isppw_flags, c.clid, c.beans, b.subsbalance,
+b.ccno, TRIM(UPPER(b.cardtype)) AS cardtype, b.issueno, b.cardnm,
+SUBSTRING(b.expiry, 1, POSITION('-' IN b.expiry)-1) AS expyear,
+SUBSTRING(b.expiry, POSITION('-' IN b.expiry)+1) AS expmon,
+SUBSTRING(b.validfrom, 1, POSITION('-' IN b.validfrom)-1) AS validyear,
+SUBSTRING(b.validfrom, POSITION('-' IN b.validfrom)+1) AS validmonth,
+b.freq,
+a.monthly_charge, a.quarterly_charge, a.annual_charge,
+DAYOFMONTH(b.next) AS nextday, MONTH(b.next) AS nextmonth, YEAR(b.next) AS nextyear,
+DAYOFMONTH(b.next_topup) AS nextday_topup, MONTH(b.next_topup) AS nextmonth_topup, YEAR(b.next_topup) AS nextyear_topup,
+IF(pr.fixed_period IS NOT NULL AND (pr.duration IS NULL OR (b.promo_started IS NOT NULL AND b.promo_started + pr.duration >= CURDATE())), (b.next + INTERVAL pr.fixed_period MONTH), (b.next + INTERVAL b.bill_period MONTH)) AS futurenextbill,
+IF(pr.fixed_period IS NOT NULL AND (pr.duration IS NULL OR (b.promo_started IS NOT NULL AND b.promo_started + pr.duration >= CURDATE())), (b.next + INTERVAL pr.fixed_period MONTH - INTERVAL 1 DAY), (b.next + INTERVAL b.bill_period MONTH - INTERVAL 1 DAY)) AS endbillperiod,
+b.next_topup,
+b.next_topup + INTERVAL (12/a.topup_rate) MONTH AS future_topupdate,
+b.next + INTERVAL (12/a.topup_rate) MONTH AS subs_topupdate,
+TO_DAYS(b.next_topup)-TO_DAYS(NOW()) AS days_to_topup,
+CURDATE() + INTERVAL 1 MONTH AS future_month,
+IF( TO_DAYS(b.next) > TO_DAYS(CURDATE() + INTERVAL 1 MONTH),    DATE_SUB(b.next, INTERVAL 1 MONTH) ,    CURDATE() + INTERVAL 1 YEAR)  AS newstopup_nextbill,
+bg.id AS bgroupid,
+'' AS bgroup_company, '' AS bgtype,
+pc.change_code AS pending_change_code, pc.staff AS pcstaff,
+pc.date AS pc_date, pc.new_acctype AS pc_new_acctype, pc.note AS pc_note, pc.freq AS pc_freq,
+b.processed AS cheque_proc, b.action AS cheque_action,
+DAYOFMONTH(b.action_date) AS actionday, MONTH(b.action_date) AS actionmonth,
+YEAR(b.action_date) AS actionyear,
+FROM_UNIXTIME(c.tim_start)>(CURDATE()-INTERVAL 2 MONTH) AS new_account,
+ce.id AS email_id,
+ROUND((UNIX_TIMESTAMP(CURDATE())-c.tim_closed)/(60*60*24)) AS days_closed,
+TO_DAYS(CURDATE()) - to_days(b.next) as days_overdue,
+b.online_time AS log_update_online_time,
+b.subsbalance AS log_update_subsbalance,
+b.next AS log_update_next,
+b.next_topup AS log_update_next_topup,
+c.beans AS log_update_beans,
+c.balance AS log_update_balance,
+c.flags as log_update_flags,
+IF( email is not null and email <> '',
+        email,
+        CONCAT(mbx.localpart, '@', vdmbx.domain_name)
+) AS email_address,
+b.account_holder AS dd_account_holder,
+b.sort_code AS dd_account_sortcode,
+b.account_no AS dd_account_no,
+b.dd_ref AS dd_ref,
+b.dd_failures AS dd_failures,
+b.indiv_install, b.indiv_recurring, b.promo_id,
+(b.next < date_add(b.promo_started, interval pr.duration month)) AS promo_duration_valid,
+pr.fixed_install AS promo_fixed_install, pr.fixed_recurring AS promo_fixed_recurring,
+pr.fixed_period AS promo_fixed_period, pr.discount_install AS promo_discount_install,
+pr.discount_recurring AS promo_discount_recurring,
+((NOW() < pr.valid_to) AND (NOW() > pr.valid_from)) AS promo_valid,
+ba.amount AS billing_adjustment,
+ba.amount_forced AS billing_adjustment_forced,
+ba.oldest_unpayed < (CURDATE() - INTERVAL 1 MONTH) AS billing_adjustment_due
+
+FROM  closed_billing b INNER JOIN closed_isppw c ON (b.id=c.id)
+INNER JOIN account_types a ON (c.acctype=a.acctype)
+INNER JOIN visp_domains vd ON (c.domain_id = vd.domain_id)
+LEFT OUTER JOIN mailboxes mbx ON (mbx.isppw_id = c.id AND mbx.default_mailbox = 'yes')
+LEFT OUTER JOIN visp_domains vdmbx ON (mbx.domain_id = vdmbx.domain_id)
+LEFT OUTER JOIN tariff t ON (a.acctype = t.acctype AND t.band_id=5)
+LEFT OUTER JOIN pending_changes pc ON (c.id=pc.id)
+LEFT OUTER JOIN billing_groups bg ON (c.bgroup = bg.id)
+LEFT OUTER JOIN contact_email ce ON (c.contact_email_id = ce.id)
+LEFT OUTER JOIN promotions pr ON (b.promo_id = pr.promo_id)
+LEFT OUTER JOIN (
+  SELECT    isppw_id,
+    MIN(date_entered) AS oldest_unpayed,
+    SUM(amount) AS amount,
+    SUM(IF(bill_now = 'yes', amount, 0)) AS amount_forced,
+    SUM(IF(bill_now = 'yes', 1, 0)) AS forced_no
+  FROM
+    billing_adjustment
+  WHERE
+    date_paid IS NULL
+    AND (billing_adjustment_id IS NULL OR billing_adjustment_id <= 1583)
+    AND bill_closed = 'yes'
+  GROUP BY
+    isppw_id
+) ba ON ( ba.isppw_id = c.id )
+WHERE  b.pending=0
+AND a.currency='GBP'
+AND a.sdesc <> 'onlpur'
+AND a.flags LIKE '%b%'
+AND LOWER(c.flags) NOT LIKE '%c%'
+AND (
+  ( ba.oldest_unpayed < (CURDATE() - INTERVAL 1 MONTH)
+    OR ba.forced_no > 0
+  )
+)
+AND b.payment_type IN (2, 1, 4)
+
